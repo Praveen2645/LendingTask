@@ -34,12 +34,12 @@ contract LendingAndBorrowing is Ownable, ReentrancyGuard, Pausable {
     struct Borrowers {
         address borrower;
         uint256 amount;
-        uint256 term;
+        uint256 startTime;
         uint256 interestRate;
-        uint256 extraAmount;
+        
     }
 
-    mapping(address => uint256) private _balances; //keep records of tokens owned
+    mapping(address => uint256) private _tokenBalances; //keep records of tokens owned
     mapping(address => Borrowers) private _borrowers; //keep records of borrowers
 
     function lend() external payable {
@@ -55,43 +55,41 @@ contract LendingAndBorrowing is Ownable, ReentrancyGuard, Pausable {
         require(PBMCToken.transfer(msg.sender, pbmcAmount), "Transfer failed");
 
         // Update the lender's balance
-        _balances[msg.sender] += pbmcAmount;
+        _tokenBalances[msg.sender] += pbmcAmount;
     }
 
-    function borrow(uint256 _amount, uint256 _extraAmount, uint256 _ltvRatio) external {
-        require(_amount > 0, "Amount should be greater than 0");
+    function borrow(uint256 _tokenAmount) external {
+        require(_tokenAmount > 0, "Amount should be greater than 0");
         require(
-            address(this).balance >= _amount + _extraAmount,
-            "Insufficient Ether balance in the contract"
+            PBMCToken.balanceOf(msg.sender) >= _tokenAmount,
+            "Insufficient PBMC balance"
         );
 
-        uint256 collateralValue = calculateCollateralValue(_amount, _extraAmount);
-        uint256 loanValue = calculateLoanValue(_amount, _ltvRatio);
-
+        // Transfer the PBMC coins from the borrower to the contract
         require(
-            collateralValue >= loanValue,
-            "Insufficient collateral for the loan"
+            PBMCToken.transferFrom(msg.sender, address(this), _tokenAmount),
+            "PBMC transfer failed"
         );
 
-        // Transfer the borrowed Ether to the borrower
-        payable(msg.sender).transfer(_amount);
+        // Calculate the equivalent amount of ethers to transfer
+        uint256 etherAmount = calculateEtherAmount(_tokenAmount);
+
+        // Transfer the ethers to the borrower
+        payable(msg.sender).transfer(etherAmount);
 
         // Update the borrower's balance
-        _balances[msg.sender] += _amount;
+        _tokenBalances[msg.sender] += etherAmount;
 
         // Store the borrower's details
         _borrowers[msg.sender] = Borrowers(
             msg.sender,
-            _amount,
+            etherAmount,
             block.timestamp,
-            0,
-            _extraAmount
+            0
         );
     }
 
     function repay() external payable {
-        uint256 repaymentAmount = msg.value;
-
         // Check if the borrower has an active loan
         Borrowers storage borrower = _borrowers[msg.sender];
         require(
@@ -99,25 +97,18 @@ contract LendingAndBorrowing is Ownable, ReentrancyGuard, Pausable {
             "No active loan found"
         );
 
-        // Check if the borrower has enough balance to repay the loan and extra amount
-        require(
-            _balances[msg.sender] >= repaymentAmount,
-            "Insufficient balance to repay"
-        );
+        uint256 repaymentAmount = msg.value;
 
-        // Transfer the repayment amount from the borrower to the contract
-        _balances[msg.sender] -= repaymentAmount;
-        payable(address(this)).transfer(repaymentAmount);
-
-        // Transfer the extra amount back to the borrower
-        payable(msg.sender).transfer(borrower.extraAmount);
-
-        // Transfer the equivalent PBMC tokens from the contract to the borrower
+        // Calculate the equivalent amount of PBMC tokens to return
         uint256 pbmcAmount = calculatePBMC(repaymentAmount);
+
+        // Check if the contract has enough PBMC tokens to return
         require(
             PBMCToken.balanceOf(address(this)) >= pbmcAmount,
             "Insufficient PBMC balance in the contract"
         );
+
+        // Transfer the equivalent PBMC tokens from the contract to the borrower
         require(
             PBMCToken.transfer(msg.sender, pbmcAmount),
             "Transfer failed"
@@ -125,6 +116,12 @@ contract LendingAndBorrowing is Ownable, ReentrancyGuard, Pausable {
 
         // Clear the borrower's details
         delete _borrowers[msg.sender];
+
+        // Transfer any remaining excess ether back to the borrower
+        if (msg.value > repaymentAmount) {
+            uint256 excessAmount = msg.value - repaymentAmount;
+            payable(msg.sender).transfer(excessAmount);
+        }
     }
 
     function calculatePBMC(uint256 etherAmount) internal pure returns (uint256) {
@@ -132,14 +129,12 @@ contract LendingAndBorrowing is Ownable, ReentrancyGuard, Pausable {
         return etherAmount * exchangeRate;
     }
 
-    function calculateCollateralValue(uint256 amount, uint256 extraAmount) internal view returns (uint256) {
-        return address(this).balance + amount + extraAmount;
-    }
-
-    function calculateLoanValue(uint256 amount, uint256 ltvRatio) internal pure returns (uint256) {
-        require(ltvRatio > 0 && ltvRatio <= 100, "Invalid LTV ratio");
-
-        uint256 loanValue = (amount * 100) / ltvRatio;
-        return loanValue;
+    function calculateEtherAmount(uint256 pbmcAmount)
+        internal
+        pure
+        returns (uint256)
+    {
+        uint256 exchangeRate = 10; // Assume the exchange rate is 10 PBMC per wei
+        return pbmcAmount / exchangeRate;
     }
 }
